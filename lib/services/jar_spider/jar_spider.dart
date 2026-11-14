@@ -19,6 +19,7 @@ import '../../models/site_config.dart';
 import '../../models/vod.dart';
 import '../drive/baidu_native.dart';
 import '../drive/drive_ext.dart';
+import '../drive/quark_native.dart';
 import '../drive/uc_native.dart';
 import '../runtime_extension.dart';
 import '../jvm/arm_bridge_runtime.dart';
@@ -320,7 +321,7 @@ class JarSpiderService {
     return MovieParser.toItems(body.movie, site.key);
   }
 
-  /// 百度 / UC 分享型播放的原生「免转存」解链（只读分享，不写用户网盘）。
+  /// 百度 / UC / 夸克 分享型播放的原生「免转存」解链（只读分享，不写用户网盘）。
   ///
   /// 返回 null 表示：不是网盘分享、未绑定账号或解链失败 —— 交回 jar 兜底。
   Future<PlayResult?> _resolveNativeDrivePlay(String flag, String id) async {
@@ -358,6 +359,27 @@ class JarSpiderService {
           return PlayResult(url: link.url, flag: flag, headers: link.headers);
         }
         AppLog.w('drive', 'UC 免转存解链失败：${link.reason}');
+      }
+    }
+    // 夸克排在自己的分支：fty 系壳会把夸克分享塞进 `{sId,fid,share_fid_token,…}`
+    // 这类集参数里，只有线路名明确是夸克时才解释，避免和 UC 抢同一批 id。
+    final quarkCookie = (tokens['quark'] ?? '').trim();
+    if (looksLikeQuarkShare(id, flag: flag)) {
+      if (quarkCookie.isEmpty) {
+        AppLog.w('drive', '夸克分享播放但未绑定账号，回退 jar：${shorten(id, 80)}');
+      } else {
+        final ref = extractQuarkShare(id, flag: flag);
+        final link = await resolveQuarkDirect(
+          id,
+          cookie: quarkCookie,
+          flag: flag,
+          episodeName: ref?.name ?? '',
+        );
+        if (link.ok) {
+          AppLog.i('drive', '夸克免转存直链 ${shorten(link.url, 120)}');
+          return PlayResult(url: link.url, flag: flag, headers: link.headers);
+        }
+        AppLog.w('drive', '夸克免转存解链失败：${link.reason}');
       }
     }
     return null;
