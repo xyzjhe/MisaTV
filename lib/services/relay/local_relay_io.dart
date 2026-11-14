@@ -1083,6 +1083,54 @@ class LocalRelay {
     return headers;
   }
 
+  /// 手动跟随重定向。
+  ///
+  /// ★ 为什么不能用 `request.followRedirects = true`（实测踩死过一次）：
+  ///   百度网盘 `dlink` 会先回 302 到 `*.baidupcs.com` 的真实流地址。交给 Dart 自动跟随，
+  ///   同一个 URL、同一套头，结果恒定 **403**；改成手动取 `Location` 再发一次就是 **206**。
+  ///   自动跟随在换 host 时会改写请求（丢掉 `User-Agent` —— 实测「无 UA → 403、
+  ///   有 UA → 206」，而 CDN 正是按 UA 判防盗链），所以这里自己走：
+  ///   · 每一跳都保留 User-Agent / Range / Referer（这三样是防盗链判定依据）；
+  ///   · 换 host 时丢掉 `Cookie`（本机网盘 cookie 不该发给 CDN 域，实测不带也能过）；
+  ///   · 最多 5 跳，与原来的 `maxRedirects` 一致。
+  Future<HttpClientResponse> _openFollow(
+    HttpClient targetClient, {
+    required String url,
+    required Map<String, String> headers,
+    required String method,
+    String? range,
+  }) async {
+    var current = Uri.parse(url);
+    final origin = current.host.toLowerCase();
+    for (var hop = 0; hop <= 5; hop++) {
+      final req = await targetClient.openUrl(method, current);
+      final crossHost = current.host.toLowerCase() != origin;
+      req.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+      headers.forEach((key, value) {
+        if (crossHost && key.toLowerCase() == 'cookie') return;
+        req.headers.set(key, value);
+      });
+      if (range != null && range.isNotEmpty) {
+        req.headers.set(HttpHeaders.rangeHeader, range);
+      }
+      req.followRedirects = false;
+      final response = await req.close();
+      final code = response.statusCode;
+      final location = response.headers.value(HttpHeaders.locationHeader);
+      if (code < 300 || code >= 400 || location == null || location.isEmpty) {
+        return response;
+      }
+      // 丢弃这一跳的响应体，避免连接悬挂
+      await response.drain<void>().catchError((Object _) {});
+      current = current.resolve(location);
+      // 只跟随 http(s)；其它协议原样交回（上层按状态码处理）
+      if (!current.isScheme('http') && !current.isScheme('https')) {
+        throw HttpException('重定向到不支持的协议：${current.scheme}');
+      }
+    }
+    throw HttpException('重定向次数过多：$url');
+  }
+
   Future<HttpClientResponse> _open(
     String url, {
     required Map<String, String> headers,
@@ -1093,17 +1141,13 @@ class LocalRelay {
       ..connectionTimeout = const Duration(seconds: 15)
       ..autoUncompress = false;
 
-    Future<HttpClientResponse> send(HttpClient targetClient) async {
-      final req = await targetClient.openUrl(method, Uri.parse(url));
-      req.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
-      headers.forEach((key, value) => req.headers.set(key, value));
-      if (range != null && range.isNotEmpty) {
-        req.headers.set(HttpHeaders.rangeHeader, range);
-      }
-      req.followRedirects = true;
-      req.maxRedirects = 5;
-      return req.close();
-    }
+    Future<HttpClientResponse> send(HttpClient targetClient) => _openFollow(
+      targetClient,
+      url: url,
+      headers: headers,
+      method: method,
+      range: range,
+    );
 
     try {
       return await send(client);
