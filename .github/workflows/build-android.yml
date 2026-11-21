@@ -91,12 +91,18 @@ jobs:
         # 的 build.gradle 仍引用它导致构建失败。按官方建议改用 proguard-android-optimize.txt。
         # 仅修改 pub-cache 内的临时副本，仓库源码零侵入。
         run: |
-          f=$(find "$HOME/.pub-cache" -path '*flutter_inappwebview_android*/android/build.gradle' 2>/dev/null | head -1)
-          if [ -n "$f" ]; then
+          # 不能只取 head -1：插件包自带 example/ 子工程，它的 android/build.gradle 常被
+          # find 先命中，导致真正要用的插件 build.gradle 没被改，AGP 9.1 仍然报
+          # proguard-android.txt 已移除。这里排除 example/ 并逐个改写，找不到就报错。
+          n=0
+          while IFS= read -r f; do
             sed -i "s/getDefaultProguardFile('proguard-android.txt')/getDefaultProguardFile('proguard-android-optimize.txt')/g" "$f"
             echo "patched: $f"
-          else
-            echo "flutter_inappwebview_android build.gradle not found, skip"
+            n=$((n+1))
+          done < <(find "$HOME/.pub-cache" -path '*flutter_inappwebview_android*' -name build.gradle -path '*/android/*' -not -path '*/example/*' 2>/dev/null)
+          if [ "$n" -eq 0 ]; then
+            echo "::error::flutter_inappwebview_android 的 build.gradle 未找到，patch 未生效"
+            exit 1
           fi
 
       - name: Decode Android release keystore
